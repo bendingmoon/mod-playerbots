@@ -223,6 +223,9 @@ bool PlayerbotAIConfig::Initialize()
     maxRandomBotsPriceChangeInterval =
         sConfigMgr->GetOption<int32>("AiPlayerbot.MaxRandomBotsPriceChangeInterval", 48 * HOUR);
     randomBotJoinLfg = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotJoinLfg", true);
+    lfgSpawnBotsOnDemand = sConfigMgr->GetOption<bool>("AiPlayerbot.LfgSpawnBotsOnDemand", false);
+    lfgSpawnBotLogoutDelay = sConfigMgr->GetOption<uint32>("AiPlayerbot.LfgSpawnBotLogoutDelay", 30);
+    lfgSpawnBotMaxLevelDiff = sConfigMgr->GetOption<uint32>("AiPlayerbot.LfgSpawnBotMaxLevelDiff", 5);
 
     restrictHealerDPS = sConfigMgr->GetOption<bool>("AiPlayerbot.HealerDPSMapRestriction", false);
     LoadList<std::vector<uint32>>(

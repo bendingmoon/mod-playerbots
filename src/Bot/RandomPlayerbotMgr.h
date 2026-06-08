@@ -140,6 +140,11 @@ public:
     std::string GetData(uint32 bot, std::string const& type);
     void SetValue(uint32 bot, std::string const& type, uint32 value, std::string const& data = "");
     void SetValue(Player* bot, std::string const& type, uint32 value, std::string const& data = "");
+    CachedEvent* FindEvent(uint32 bot, std::string const& event);
+    uint32 GetEventValue(uint32 bot, std::string const& event);
+    std::string GetEventData(uint32 bot, std::string const& event);
+    uint32 SetEventValue(uint32 bot, std::string const& event, uint32 value, uint32 validIn,
+                         std::string const& data = "");
     bool IsSpecPvp(uint32 bot, uint8 cls);
     void Remove(Player* bot);
     ObjectGuid GetBattleMasterGUID(Player* bot, BattlegroundTypeId bgTypeId);
@@ -219,11 +224,6 @@ private:
     bool _isBotInitializing = true;
     bool _isBotLogging = true;
     NewRpgStatistic rpgStasticTotal;
-    CachedEvent* FindEvent(uint32 bot, std::string const& event);
-    uint32 GetEventValue(uint32 bot, std::string const& event);
-    std::string GetEventData(uint32 bot, std::string const& event);
-    uint32 SetEventValue(uint32 bot, std::string const& event, uint32 value, uint32 validIn,
-                         std::string const& data = "");
     void GetBots();
     std::vector<uint32> GetBgBots(uint32 bracket);
     time_t BgCheckTimer;

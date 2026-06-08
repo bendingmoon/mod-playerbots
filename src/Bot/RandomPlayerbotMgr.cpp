@@ -25,6 +25,7 @@
 #include "FleeManager.h"
 #include "GridNotifiers.h"
 #include "LFGMgr.h"
+#include "LfgGroupBotMgr.h"
 #include "MapMgr.h"
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
@@ -285,7 +286,20 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
 
     totalPmo = sPerfMonitor.start(PERF_MON_TOTAL, "RandomPlayerbotMgr::FullTick");
 
-    if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
+    if (!sPlayerbotAIConfig.enabled)
+        return;
+
+    // LFG on-demand spawning runs even when randomBotAutologin is off,
+    // so that real players can get bots only when queueing for RDF.
+    if (sPlayerbotAIConfig.randomBotJoinLfg)
+    {
+        if (time(nullptr) > (LfgCheckTimer + 30))
+            sRandomPlayerbotMgr.CheckLfgQueue();
+    }
+    if (sPlayerbotAIConfig.lfgSpawnBotsOnDemand)
+        sLfgGroupBotMgr.Update(0);
+
+    if (!sPlayerbotAIConfig.randomBotAutologin)
         return;
 
     /*if (sPlayerbotAIConfig.enablePrototypePerformanceDiff)
@@ -380,12 +394,6 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     {
         if (time(nullptr) > (BgCheckTimer + 35))
             sRandomPlayerbotMgr.CheckBgQueue();
-    }
-
-    if (sPlayerbotAIConfig.randomBotJoinLfg /* && !players.empty()*/)
-    {
-        if (time(nullptr) > (LfgCheckTimer + 30))
-            sRandomPlayerbotMgr.CheckLfgQueue();
     }
 
     if (sPlayerbotAIConfig.randomBotAutologin && time(nullptr) > (printStatsTimer + 300))
@@ -1252,11 +1260,14 @@ void RandomPlayerbotMgr::CheckLfgQueue()
     if (!LfgCheckTimer || time(nullptr) > (LfgCheckTimer + 30))
         LfgCheckTimer = time(nullptr);
 
-    LOG_DEBUG("playerbots", "Checking LFG Queue...");
+    LOG_INFO("playerbots", "Checking LFG Queue... {} players in list", players.size());
 
     // Clear LFG list
     LfgDungeons[TEAM_ALLIANCE].clear();
     LfgDungeons[TEAM_HORDE].clear();
+
+    // Track real players queueing (for on-demand bot spawning)
+    std::vector<std::pair<Player*, std::vector<uint32>>> queueingRealPlayers;
 
     for (std::vector<Player*>::iterator i = players.begin(); i != players.end(); ++i)
     {
@@ -1264,12 +1275,22 @@ void RandomPlayerbotMgr::CheckLfgQueue()
         if (!player || !player->IsInWorld())
             continue;
 
+        // Distinguish real players from AI bots
+        // No botAI = genuine human (vanilla client)
+        // botAI + IsRealPlayer() = human using bot addon (master == self)
+        // botAI + !IsRealPlayer() = AI-controlled bot
+        bool isRealPlayer = true;
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
+        if (botAI && !botAI->IsRealPlayer())
+            isRealPlayer = false; // AI bot
+
         Group* group = player->GetGroup();
         ObjectGuid guid = group ? group->GetGUID() : player->GetGUID();
 
         lfg::LfgState gState = sLFGMgr->GetState(guid);
         if (gState != lfg::LFG_STATE_NONE && gState < lfg::LFG_STATE_DUNGEON)
         {
+            std::vector<uint32> playerDungeons;
             lfg::LfgDungeonSet const& dList = sLFGMgr->GetSelectedDungeons(player->GetGUID());
             for (lfg::LfgDungeonSet::const_iterator itr = dList.begin(); itr != dList.end(); ++itr)
             {
@@ -1278,11 +1299,39 @@ void RandomPlayerbotMgr::CheckLfgQueue()
                     continue;
 
                 LfgDungeons[player->GetTeamId()].push_back(dungeon->id);
+                playerDungeons.push_back(dungeon->id);
             }
+
+            LOG_INFO("playerbots", "LFG Check: player={} isRealPlayer={} lfgState={} dungeons={} group={}",
+                     player->GetName().c_str(), isRealPlayer, (uint32)gState,
+                     playerDungeons.size(), group ? "yes" : "no");
+
+            // Queue real (non-bot) players for on-demand bot spawning
+            if (isRealPlayer && !playerDungeons.empty())
+                queueingRealPlayers.push_back({player, playerDungeons});
+        }
+        else
+        {
+            LOG_INFO("playerbots", "LFG Check: player={} isRealPlayer={} lfgState={} - skipping (not queueing)",
+                     player->GetName().c_str(), isRealPlayer, (uint32)gState);
         }
     }
 
-    LOG_DEBUG("playerbots", "LFG Queue check finished");
+    // On-demand LFG bot spawning for real players
+    if (sPlayerbotAIConfig.lfgSpawnBotsOnDemand)
+    {
+        LOG_INFO("playerbots", "LFG: lfgSpawnBotsOnDemand=1, {} real players queueing",
+                 queueingRealPlayers.size());
+        for (auto& [player, dungeonIds] : queueingRealPlayers)
+            sLfgGroupBotMgr.OnPlayerQueueForLfg(player, dungeonIds);
+    }
+    else
+    {
+        LOG_INFO("playerbots", "LFG: lfgSpawnBotsOnDemand=0, skipping on-demand spawning");
+    }
+
+    LOG_INFO("playerbots", "LFG Queue check finished. LfgDungeons[A]={} LfgDungeons[H]={}",
+             LfgDungeons[TEAM_ALLIANCE].size(), LfgDungeons[TEAM_HORDE].size());
 }
 
 void RandomPlayerbotMgr::CheckPlayers()

@@ -145,6 +145,9 @@ public:
     uint32 minRandomBotsPriceChangeInterval, maxRandomBotsPriceChangeInterval;
     uint32 disabledWithoutRealPlayerLoginDelay, disabledWithoutRealPlayerLogoutDelay;
     bool randomBotJoinLfg;
+    bool lfgSpawnBotsOnDemand;        // Enable on-demand LFG bot spawning when real player queues
+    uint32 lfgSpawnBotLogoutDelay;    // Delay (seconds) before spawned LFG bots logout after dungeon (0=immediate)
+    uint32 lfgSpawnBotMaxLevelDiff;   // Max level difference between spawned bots and queueing player
 
     // Buff system
     // Min group size to use Greater buffs (Paladin, Mage, Druid). Default: 3
