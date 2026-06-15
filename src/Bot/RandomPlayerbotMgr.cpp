@@ -13,6 +13,7 @@
 #include <ctime>
 #include <iomanip>
 #include <random>
+#include <set>
 
 #include "AiFactory.h"
 #include "Battleground.h"
@@ -1268,6 +1269,8 @@ void RandomPlayerbotMgr::CheckLfgQueue()
 
     // Track real players queueing (for on-demand bot spawning)
     std::vector<std::pair<Player*, std::vector<uint32>>> queueingRealPlayers;
+    // Track processed group GUIDs to avoid spawning bots multiple times for the same group
+    std::set<ObjectGuid> processedGroups;
 
     for (std::vector<Player*>::iterator i = players.begin(); i != players.end(); ++i)
     {
@@ -1288,8 +1291,21 @@ void RandomPlayerbotMgr::CheckLfgQueue()
         ObjectGuid guid = group ? group->GetGUID() : player->GetGUID();
 
         lfg::LfgState gState = sLFGMgr->GetState(guid);
-        if (gState != lfg::LFG_STATE_NONE && gState < lfg::LFG_STATE_DUNGEON)
+        // Only spawn bots when the group is actually queued (after all members
+        // have confirmed their roles) — not during ROLECHECK or PROPOSAL phases.
+        if (gState == lfg::LFG_STATE_QUEUED)
         {
+            // Dedup by group: if multiple real players are in the same group,
+            // only spawn bots once for the group
+            if (group && processedGroups.find(group->GetGUID()) != processedGroups.end())
+            {
+                LOG_INFO("playerbots", "LFG Check: player={} group already processed, skipping",
+                         player->GetName().c_str());
+                continue;
+            }
+            if (group)
+                processedGroups.insert(group->GetGUID());
+
             std::vector<uint32> playerDungeons;
             lfg::LfgDungeonSet const& dList = sLFGMgr->GetSelectedDungeons(player->GetGUID());
             for (lfg::LfgDungeonSet::const_iterator itr = dList.begin(); itr != dList.end(); ++itr)
@@ -1312,7 +1328,7 @@ void RandomPlayerbotMgr::CheckLfgQueue()
         }
         else
         {
-            LOG_INFO("playerbots", "LFG Check: player={} isRealPlayer={} lfgState={} - skipping (not queueing)",
+            LOG_INFO("playerbots", "LFG Check: player={} isRealPlayer={} lfgState={} - skipping (not in QUEUED state)",
                      player->GetName().c_str(), isRealPlayer, (uint32)gState);
         }
     }

@@ -6,6 +6,7 @@
 #include "LeaveGroupAction.h"
 
 #include "Event.h"
+#include "LfgGroupBotMgr.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 
@@ -89,6 +90,10 @@ bool LeaveGroupAction::Leave()
         botAI->TellMaster("Goodbye!", PLAYERBOT_SECURITY_TALK);
 
     botAI->LeaveOrDisbandGroup();
+
+    // Notify LFG bot manager so spawned bots are cleaned up immediately
+    sLfgGroupBotMgr.OnBotLeftGroup(bot);
+
     return true;
 }
 

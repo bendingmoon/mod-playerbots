@@ -69,6 +69,9 @@ public:
     // Force cleanup of all bots spawned for a specific player (e.g. player logs out)
     void CleanupBotsForPlayer(ObjectGuid playerGuid);
 
+    // Called when a bot leaves a group — immediately clean up if it's an LFG-spawned bot
+    void OnBotLeftGroup(Player* bot);
+
 private:
     LfgGroupBotMgr() = default;
     ~LfgGroupBotMgr() = default;

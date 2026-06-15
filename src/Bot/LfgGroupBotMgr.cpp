@@ -152,21 +152,72 @@ void LfgGroupBotMgr::CleanupBotsForPlayer(ObjectGuid playerGuid)
     }
 }
 
+void LfgGroupBotMgr::OnBotLeftGroup(Player* bot)
+{
+    if (!bot)
+        return;
+
+    // Look for this bot in the spawned bots list
+    for (auto& info : m_spawnedBots)
+    {
+        if (info.botGuid == bot->GetGUID() &&
+            info.state < LfgSpawnBotState::TO_LOGOUT)
+        {
+            LOG_INFO("playerbots", "LFG: Bot {} left group, cleaning up immediately",
+                     bot->GetName().c_str());
+            CleanupBot(info);
+            return;
+        }
+    }
+}
+
 // ---- Private: Role Calculation ----
 
 void LfgGroupBotMgr::CalculateNeededRoles(Player* player, LfgPlayerQueueInfo& info)
 {
     uint8 existingTanks = 0, existingHealers = 0, existingDps = 0;
 
-    // Count the player's own role
-    if (info.playerRole & PLAYER_ROLE_TANK)
-        existingTanks++;
-    else if (info.playerRole & PLAYER_ROLE_HEALER)
-        existingHealers++;
-    else
-        existingDps++;
+    // Count roles of ALL real (non-bot) party members, not just the triggering player.
+    // At LFG_STATE_QUEUED all members have already confirmed their roles in LFG.
+    Group* group = player->GetGroup();
+    if (group)
+    {
+        for (auto const& slot : group->GetMemberSlots())
+        {
+            Player* member = ObjectAccessor::FindPlayer(slot.guid);
+            if (!member)
+                continue;
 
-    // Count already-spawned bots for this player
+            // Skip AI-controlled bots — only count real human players
+            PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);
+            if (memberAI && !memberAI->IsRealPlayer())
+                continue;
+
+            uint8 memberRole = sLFGMgr->GetRoles(member->GetGUID());
+            if (!memberRole)
+                memberRole = PLAYER_ROLE_DAMAGE; // fallback if no role set
+
+            if (memberRole & PLAYER_ROLE_TANK)
+                existingTanks++;
+            else if (memberRole & PLAYER_ROLE_HEALER)
+                existingHealers++;
+            else
+                existingDps++;
+        }
+    }
+    else
+    {
+        // Solo player — count just the player
+        if (info.playerRole & PLAYER_ROLE_TANK)
+            existingTanks++;
+        else if (info.playerRole & PLAYER_ROLE_HEALER)
+            existingHealers++;
+        else
+            existingDps++;
+    }
+
+    // Count already-spawned bots for this player (these are bots we spawned
+    // in a previous check cycle that are still logging in or in queue)
     for (auto const& spawned : m_spawnedBots)
     {
         if (spawned.playerGuid == player->GetGUID() &&
@@ -319,9 +370,11 @@ void LfgGroupBotMgr::CleanupBot(LfgSpawnedBotInfo& info)
     Player* bot = ObjectAccessor::FindConnectedPlayer(info.botGuid);
     if (!bot)
     {
-        // Bot is already offline, just mark for removal
-        info.state = LfgSpawnBotState::TO_LOGOUT;
+        // Bot is already offline. Clear the "add" event so ProcessBot won't
+        // keep trying to re-add this bot indefinitely, then mark for removal.
+        sRandomPlayerbotMgr.SetEventValue(info.botGuid.GetCounter(), "add", 0, 0);
         m_pendingLogins.erase(info.botGuid.GetCounter());
+        info.state = LfgSpawnBotState::TO_LOGOUT;
         return;
     }
 
@@ -353,14 +406,16 @@ void LfgGroupBotMgr::CleanupBot(LfgSpawnedBotInfo& info)
         }
     }
 
-    // 3. Schedule bot logout via the "add" event expiry
-    //    Set add=1 with a countdown of 'delay' seconds. When it expires (value→0),
-    //    ProcessBot() will see add==0, no group → LogoutPlayerBot().
-    //    delay=0 means expire immediately → next ProcessBot kicks the bot.
-    uint32 delay = sPlayerbotAIConfig.lfgSpawnBotLogoutDelay;
-    sRandomPlayerbotMgr.SetEventValue(info.botGuid.GetCounter(), "add", 1, delay);
+    // 3. Immediately expire the "add" event so ProcessBot won't re-add the bot
+    //    and log the bot out right now (no delay).
+    //    Previously a 30s delay was used, during which the bot's AI kept running
+    //    and could join another group, preventing logout indefinitely.
+    sRandomPlayerbotMgr.SetEventValue(info.botGuid.GetCounter(), "add", 0, 0);
 
-    // 4. Clean up tracking
+    // 4. Immediately logout the bot
+    sRandomPlayerbotMgr.LogoutPlayerBot(info.botGuid);
+
+    // 5. Clean up tracking
     m_pendingLogins.erase(info.botGuid.GetCounter());
     info.state = LfgSpawnBotState::TO_LOGOUT;
 }
@@ -435,8 +490,11 @@ void LfgGroupBotMgr::CheckAndCleanup()
                                       && dungeon->TypeID != LFG_TYPE_RAID))
                             continue;
                         uint8 botLevel = bot->GetLevel();
-                        if (dungeon->MinLevel
-                            && (botLevel < dungeon->MinLevel || botLevel > dungeon->MaxLevel))
+                        // Only check MinLevel/MaxLevel bounds when they are actually set.
+                        // MaxLevel=0 means "no maximum" (common for LFG_TYPE_RANDOM entries),
+                        // so we must not compare against it or all bots get filtered out.
+                        if ((dungeon->MinLevel && botLevel < dungeon->MinLevel) ||
+                            (dungeon->MaxLevel && botLevel > dungeon->MaxLevel))
                             continue;
                         if (botLevel > dungeon->MinLevel + 10
                             && dungeon->TypeID == LFG_TYPE_DUNGEON)
@@ -459,25 +517,29 @@ void LfgGroupBotMgr::CheckAndCleanup()
 
                         LOG_INFO("playerbots", "LFG: Bot {} joined LFG role={} dungeons={}",
                                  bot->GetName().c_str(), info.assignedRole, list.size());
+
+                        info.state = LfgSpawnBotState::IN_QUEUE;
+                        LOG_INFO("playerbots", "LFG: Bot {} now in world, queued for LFG with player {}",
+                                 bot->GetName().c_str(), player ? player->GetName().c_str() : "?");
                     }
                     else
                     {
-                        LOG_INFO("playerbots", "LFG: Bot {} — no matching dungeons, will be cleaned up",
+                        // No matching dungeons — clean up immediately instead of
+                        // transitioning to IN_QUEUE and blocking the slot for 300s.
+                        LOG_INFO("playerbots", "LFG: Bot {} — no matching dungeons, cleaning up immediately",
                                  bot->GetName().c_str());
+                        CleanupBot(info);
                     }
                 }
-
-                info.state = LfgSpawnBotState::IN_QUEUE;
-                LOG_INFO("playerbots", "LFG: Bot {} now in world, queued for LFG with player {}",
-                         bot->GetName().c_str(), player ? player->GetName().c_str() : "?");
             }
-            else if (now - info.spawnTime > 120)
+            else if (now - info.spawnTime > 60)
             {
-                // Login timeout (2 minutes) — bot failed to log in, cleanup
-                LOG_INFO("playerbots", "LFG: Bot login timeout for guid {}",
+                // Login timeout (1 minute) — bot failed to log in.
+                // Clean up properly (including the "add" event) so the slot
+                // is freed for a replacement bot.
+                LOG_INFO("playerbots", "LFG: Bot login timeout for guid {}, cleaning up",
                          info.botGuid.ToString().c_str());
-                m_pendingLogins.erase(info.botGuid.GetCounter());
-                info.state = LfgSpawnBotState::TO_LOGOUT;
+                CleanupBot(info);
             }
             continue;
         }
@@ -487,8 +549,11 @@ void LfgGroupBotMgr::CheckAndCleanup()
         {
             if (!bot || !bot->IsInWorld())
             {
-                // Bot went offline unexpectedly
-                info.state = LfgSpawnBotState::TO_LOGOUT;
+                // Bot went offline unexpectedly — clean up properly so
+                // a replacement can be spawned on the next CheckLfgQueue.
+                LOG_INFO("playerbots", "LFG: Bot {} went offline while in queue, cleaning up",
+                         info.botGuid.ToString().c_str());
+                CleanupBot(info);
                 continue;
             }
 
@@ -597,8 +662,11 @@ void LfgGroupBotMgr::CheckAndCleanup()
         {
             if (!bot || !bot->IsInWorld())
             {
-                // Bot went offline during dungeon (shouldn't happen normally)
-                info.state = LfgSpawnBotState::TO_LOGOUT;
+                // Bot went offline during dungeon — proper cleanup so the slot
+                // is freed and a replacement can be spawned.
+                LOG_INFO("playerbots", "LFG: Bot {} went offline while in dungeon, cleaning up",
+                         info.botGuid.ToString().c_str());
+                CleanupBot(info);
                 continue;
             }
 
