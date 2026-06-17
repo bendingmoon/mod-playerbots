@@ -8,6 +8,7 @@
 
 #include "ObjectGuid.h"
 #include "Player.h"
+#include "PlayerbotAI.h"
 #include "PlayerbotAIBase.h"
 
 class ChatHandler;
@@ -85,6 +86,13 @@ public:
     void HandleViewLinkedAccountsCommand(Player* player);
     void HandleUnlinkAccountCommand(Player* player, const std::string& accountName);
 
+    // Auto-pilot: real player temporarily controlled by bot AI
+    bool StartAutoPilot(AutoPilotTask task, uint32 taskId);
+    void StopAutoPilot(std::string const& reason = "");
+    bool IsAutoPilotActive() const { return autoPilotActive; }
+    AutoPilotTask GetAutoPilotTask() const { return autoPilotTask; }
+    uint32 GetAutoPilotTaskId() const { return autoPilotTaskId; }
+
 protected:
     void OnBotLoginInternal(Player* const bot) override;
     void CheckTellErrors(uint32 elapsed);
@@ -93,6 +101,10 @@ private:
     Player* const master;
     PlayerBotErrorMap errors;
     time_t lastErrorTell;
+    // Auto-pilot state
+    bool autoPilotActive = false;
+    AutoPilotTask autoPilotTask = AutoPilotTask::NONE;
+    uint32 autoPilotTaskId = 0;
 };
 
 class PlayerbotsMgr

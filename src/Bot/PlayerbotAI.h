@@ -76,6 +76,14 @@ enum BotState
     BOT_STATE_MAX
 };
 
+enum class AutoPilotTask : uint8
+{
+    NONE    = 0,
+    QUEST   = 1,   // auto-complete quest
+    DUNGEON  = 2,   // auto-play dungeon (reserved)
+    // extend with more tasks as needed
+};
+
 bool IsAlliance(uint8 race);
 
 class PlayerbotChatHandler : protected ChatHandler
@@ -534,8 +542,35 @@ public:
     Player* GetMaster() { return master; }
     Player* FindNewMaster();
 
-    // Checks if the bot is really a player. Players always have themselves as master.
-    bool IsRealPlayer() { return master ? (master == bot) : false; }
+    // Checks if the bot is really a human player.
+    // Also returns true when real player is in auto-pilot mode.
+    bool IsRealPlayer()
+    {
+        if (isAutoPilot)
+            return true;
+        return master ? (master == bot) : (bot && bot->GetSession() && !bot->GetSession()->IsBot());
+    }
+    // Returns true when AI should control this character
+    // (true for AI bots, and true for real players in auto-pilot mode)
+    bool IsAIEnabled()
+    {
+        if (isAutoPilot)
+            return true;
+        return !IsRealPlayer();
+    }
+    // Auto-pilot: real player temporarily controlled by bot AI
+    bool IsAutoPilotActive(AutoPilotTask task) { return isAutoPilot && autoPilotTask == task; }
+    bool IsAutoPilotActive() const { return isAutoPilot; }
+    AutoPilotTask GetAutoPilotTask() const { return autoPilotTask; }
+    uint32 GetAutoPilotTaskId() const { return autoPilotTaskId; }
+    uint32 GetLastAIMoveTime() const { return lastAIMoveTime; }
+    void SetAutoPilotState(bool active, AutoPilotTask task, uint32 taskId)
+    {
+        isAutoPilot = active;
+        autoPilotTask = task;
+        autoPilotTaskId = taskId;
+        autoPilotStartTime = active ? time(nullptr) : 0;
+    }
     // Bot has a master that is a player.
     bool HasRealPlayerMaster();
     // Bot has a master that is activly playing.
@@ -651,6 +686,12 @@ protected:
     Position jumpDestination = Position();
     uint32 nextTransportCheck = 0;
     bool spellInterruptRequested = false;
+    // Auto-pilot: real player temporarily controlled by bot AI
+    bool isAutoPilot = false;
+    AutoPilotTask autoPilotTask = AutoPilotTask::NONE;
+    uint32 autoPilotTaskId = 0;
+    time_t autoPilotStartTime = 0;
+    uint32 lastAIMoveTime = 0;   // timestamp of last AI-initiated movement (for auto-pilot exit detection)
 };
 
 #endif

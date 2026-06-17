@@ -904,6 +904,7 @@ std::vector<std::string> PlayerbotHolder::HandlePlayerbotCommand(char const* arg
     {
         messages.push_back("usage: list/reload/tweak/self or add/addaccount/init/remove PLAYERNAME\n");
         messages.push_back("usage: addclass CLASSNAME [male|female|0|1]");
+        messages.push_back("usage: auto quest [questId] or auto stop");
         return messages;
     }
 
@@ -1047,6 +1048,83 @@ std::vector<std::string> PlayerbotHolder::HandlePlayerbotCommand(char const* arg
             sPlayerbotAIConfig.tweakValue = 0;
 
         messages.push_back("Set tweakvalue to " + std::to_string(sPlayerbotAIConfig.tweakValue));
+        return messages;
+    }
+
+    if (!strcmp(cmd, "auto"))
+    {
+        // .bot auto quest [questId] — start auto-pilot for quest completion
+        // .bot auto stop — stop auto-pilot
+        char* subCmd = strtok(nullptr, " ");
+
+        PlayerbotMgr* mgr = dynamic_cast<PlayerbotMgr*>(this);
+        if (!mgr)
+        {
+            messages.push_back("Auto-pilot is only available for real players.");
+            return messages;
+        }
+
+        if (!subCmd)
+        {
+            messages.push_back("usage: auto quest [questId] or auto stop");
+            return messages;
+        }
+
+        if (!strcmp(subCmd, "stop"))
+        {
+            if (mgr->IsAutoPilotActive())
+            {
+                mgr->StopAutoPilot("Stopped by player command");
+                messages.push_back("Auto-pilot stopped.");
+            }
+            else
+            {
+                messages.push_back("Auto-pilot is not active.");
+            }
+            return messages;
+        }
+
+        if (!strcmp(subCmd, "quest"))
+        {
+            char* questIdStr = strtok(nullptr, " ");
+            uint32 questId = 0;
+
+            if (questIdStr)
+            {
+                questId = atoi(questIdStr);
+            }
+            else
+            {
+                // Use currently tracked quest
+                for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+                {
+                    uint32 qId = master->GetQuestSlotQuestId(i);
+                    if (qId && master->GetQuestStatus(qId) == QUEST_STATUS_INCOMPLETE)
+                    {
+                        questId = qId;
+                        break;
+                    }
+                }
+            }
+
+            if (!questId)
+            {
+                messages.push_back("No incomplete quest found. Specify a quest ID.");
+                return messages;
+            }
+
+            if (mgr->StartAutoPilot(AutoPilotTask::QUEST, questId))
+            {
+                messages.push_back("Auto-quest started for quest #" + std::to_string(questId));
+            }
+            else
+            {
+                messages.push_back("Failed to start auto-quest. Check if quest is valid.");
+            }
+            return messages;
+        }
+
+        messages.push_back("usage: auto quest [questId] or auto stop");
         return messages;
     }
 
@@ -1478,6 +1556,25 @@ void PlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool /*minimal*/)
 {
     SetNextCheckDelay(sPlayerbotAIConfig.reactDelay);
     CheckTellErrors(elapsed);
+
+    // Auto-pilot completion detection
+    if (autoPilotActive && autoPilotTask == AutoPilotTask::QUEST && master)
+    {
+        QuestStatus status = master->GetQuestStatus(autoPilotTaskId);
+        if (status == QUEST_STATUS_COMPLETE || status == QUEST_STATUS_REWARDED)
+        {
+            // Quest finished — auto-pilot completed successfully
+            StopAutoPilot("Quest completed");
+        }
+        else if (PlayerbotAI* playerAI = GET_PLAYERBOT_AI(master))
+        {
+            // RPG strategy gave up on the quest (abandoned / timed out)
+            if (playerAI->rpgInfo.GetStatus() != RPG_DO_QUEST)
+            {
+                StopAutoPilot("Quest abandoned by AI");
+            }
+        }
+    }
 }
 
 void PlayerbotMgr::HandleCommand(uint32 type, std::string const text)
@@ -1518,6 +1615,26 @@ void PlayerbotMgr::HandleCommand(uint32 type, std::string const text)
 
 void PlayerbotMgr::HandleMasterIncomingPacket(WorldPacket const& packet)
 {
+    // Auto-pilot: detect manual player movement to auto-cancel
+    if (autoPilotActive)
+    {
+        uint16 opcode = packet.GetOpcode();
+        // Movement opcodes in 3.3.5a: MSG_MOVE_START_FORWARD (0x0B5) to MSG_MOVE_HOVER (0x0F7)
+        if (opcode >= 0x0B5 && opcode <= 0x0F7)
+        {
+            if (PlayerbotAI* playerAI = GET_PLAYERBOT_AI(GetMaster()))
+            {
+                uint32 now = getMSTime();
+                if (now - playerAI->GetLastAIMoveTime() > 500)
+                {
+                    // Player sent movement — not from AI
+                    StopAutoPilot("Manual movement detected");
+                    return;
+                }
+            }
+        }
+    }
+
     for (PlayerBotMap::const_iterator it = GetPlayerBotsBegin(); it != GetPlayerBotsEnd(); ++it)
     {
         Player* const bot = it->second;
@@ -1716,6 +1833,149 @@ void PlayerbotMgr::CheckTellErrors(uint32 /*elapsed*/)
     }
 
     errors.clear();
+}
+
+bool PlayerbotMgr::StartAutoPilot(AutoPilotTask task, uint32 taskId)
+{
+    if (!sPlayerbotAIConfig.autoPilotEnabled)
+    {
+        LOG_WARN("playerbots", "StartAutoPilot: auto-pilot is disabled in config");
+        return false;
+    }
+
+    if (!master || !master->IsInWorld())
+    {
+        LOG_ERROR("playerbots", "StartAutoPilot: master is invalid");
+        return false;
+    }
+
+    if (autoPilotActive)
+    {
+        LOG_WARN("playerbots", "StartAutoPilot: auto-pilot already active for player {}", master->GetName());
+        return false;
+    }
+
+    // Create PlayerbotAI for the real player if it doesn't exist
+    PlayerbotAI* playerAI = GET_PLAYERBOT_AI(master);
+    if (!playerAI)
+    {
+        PlayerbotsMgr::instance().AddPlayerbotData(master, true);
+        playerAI = GET_PLAYERBOT_AI(master);
+    }
+
+    if (!playerAI)
+    {
+        LOG_ERROR("playerbots", "StartAutoPilot: failed to create PlayerbotAI for {}", master->GetName());
+        return false;
+    }
+
+    // Configure auto-pilot on the AI
+    playerAI->SetAutoPilotState(true, task, taskId);
+
+    // Load task-specific strategies
+    switch (task)
+    {
+        case AutoPilotTask::QUEST:
+        {
+            const Quest* quest = sObjectMgr->GetQuestTemplate(taskId);
+            if (!quest)
+            {
+                LOG_ERROR("playerbots", "StartAutoPilot: invalid quest ID {}", taskId);
+                playerAI->SetAutoPilotState(false, AutoPilotTask::NONE, 0);
+                return false;
+            }
+
+            // Load "new rpg" strategy for realistic quest gameplay
+            playerAI->ChangeStrategy("+new rpg", BOT_STATE_NON_COMBAT);
+            playerAI->ChangeStrategy("+grind", BOT_STATE_COMBAT);
+
+            // Set RPG state to DoQuest for the specific quest
+            playerAI->rpgInfo.ChangeToDoQuest(taskId, quest);
+            break;
+        }
+        case AutoPilotTask::DUNGEON:
+        {
+            // Reserved for future dungeon auto-pilot
+            break;
+        }
+        default:
+            break;
+    }
+
+    // Record state in PlayerbotMgr
+    autoPilotActive = true;
+    autoPilotTask = task;
+    autoPilotTaskId = taskId;
+
+    ChatHandler(master->GetSession()).PSendSysMessage(
+        "|cff00ff00Auto-pilot started: {} (#{})|r",
+        task == AutoPilotTask::QUEST ? "auto-quest" : "auto-pilot",
+        taskId);
+
+    return true;
+}
+
+void PlayerbotMgr::StopAutoPilot(std::string const& reason)
+{
+    if (!autoPilotActive)
+        return;
+
+    PlayerbotAI* playerAI = GET_PLAYERBOT_AI(master);
+    if (playerAI)
+    {
+        // Clear auto-pilot state on AI
+        playerAI->SetAutoPilotState(false, AutoPilotTask::NONE, 0);
+
+        // Remove task-specific strategies
+        switch (autoPilotTask)
+        {
+            case AutoPilotTask::QUEST:
+                playerAI->ChangeStrategy("-new rpg", BOT_STATE_NON_COMBAT);
+                playerAI->ChangeStrategy("-grind", BOT_STATE_COMBAT);
+                playerAI->rpgInfo.ChangeToIdle();
+                break;
+            case AutoPilotTask::DUNGEON:
+                break;
+            default:
+                break;
+        }
+
+        // Stop AI-initiated movement
+        if (master->isMoving())
+        {
+            master->StopMoving();
+            master->GetMotionMaster()->Clear();
+        }
+    }
+
+    uint32 stoppedTaskId = autoPilotTaskId;
+    autoPilotActive = false;
+    autoPilotTask = AutoPilotTask::NONE;
+    autoPilotTaskId = 0;
+
+    // Determine stop reason code and send mobile notification
+    uint8 stopReason = 4; // other
+    std::string notifyMsg = reason;
+    if (reason.find("completed") != std::string::npos || reason.find("Quest completed") != std::string::npos)
+        stopReason = 0; // quest_completed
+    else if (reason.find("Manual movement") != std::string::npos)
+        stopReason = 1; // manual_movement
+    else if (reason.find("command") != std::string::npos || reason.find("Stopped by player") != std::string::npos)
+        stopReason = 2; // player_command
+    else if (reason.find("invalid") != std::string::npos)
+        stopReason = 3; // invalid
+
+    WorldPacket notifyPkt(SMSG_MOBILE_AUTO_QUEST_STOP, 1 + 4 + notifyMsg.size() + 1);
+    notifyPkt << stopReason;
+    notifyPkt << stoppedTaskId;
+    notifyPkt << notifyMsg;
+    master->GetSession()->SendPacket(&notifyPkt);
+
+    if (!reason.empty())
+    {
+        ChatHandler(master->GetSession()).PSendSysMessage(
+            "|cffff0000Auto-pilot stopped: {}|r", reason);
+    }
 }
 
 void PlayerbotsMgr::AddPlayerbotData(Player* player, bool isBotAI)

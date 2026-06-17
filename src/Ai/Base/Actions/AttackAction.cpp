@@ -170,7 +170,15 @@ bool AttackAction::Attack(Unit* target, bool /*with_pet*/ /*true*/)
     botAI->ChangeEngine(BOT_STATE_COMBAT);
 
     if (!WaitForAttackStrategy::ShouldWait(botAI))
+    {
         bot->Attack(target, shouldMelee);
+
+        // Unsheath weapon when attacking so other players can see it
+        if (shouldMelee)
+            bot->SetSheath(SHEATH_STATE_MELEE);
+        else
+            bot->SetSheath(SHEATH_STATE_RANGED);
+    }
     /* prevent pet dead immediately in group */
     // if (bot->GetMap()->IsDungeon() && bot->GetGroup() && !target->IsInCombat())
     // {

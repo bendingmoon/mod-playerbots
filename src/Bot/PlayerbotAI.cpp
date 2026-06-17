@@ -248,6 +248,10 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         bot->GetSession()->isLogingOut() || bot->IsDuringRemoveFromWorld())
         return;
 
+    // Only run AI for actual bots or auto-pilot players
+    if (!IsAIEnabled())
+        return;
+
     // Handle cheat options (set bot health and power if cheats are enabled)
     if (bot->IsAlive() &&
         (static_cast<uint32>(GetCheat()) > 0 || static_cast<uint32>(sPlayerbotAIConfig.botCheatMask) > 0))
@@ -546,6 +550,10 @@ void PlayerbotAI::UpdateAIInternal([[maybe_unused]] uint32 elapsed, bool minimal
 
     DoNextAction(minimal);
 
+    // Record AI activity for auto-pilot movement detection
+    if (isAutoPilot)
+        lastAIMoveTime = getMSTime();
+
     if (pmo)
         pmo->finish();
 }
@@ -768,8 +776,8 @@ void PlayerbotAI::HandleTeleportAck()
     if (!bot || !bot->GetSession())
         return;
 
-    // only for bots
-    if (IsRealPlayer())
+    // only for AI-controlled characters
+    if (!IsAIEnabled())
         return;
 
     /*
@@ -1456,6 +1464,13 @@ void PlayerbotAI::ChangeEngineOnCombat()
         aiObjectContext->GetValue<PositionInfo>("pos", "stay")
             ->Set(PositionInfo(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId()));
     }
+
+    // Unsheath weapon when entering combat so other players can see it
+    Unit* target = aiObjectContext->GetValue<Unit*>("current target")->Get();
+    if (target && IsRanged(bot) && !bot->IsWithinMeleeRange(target))
+        bot->SetSheath(SHEATH_STATE_RANGED);
+    else
+        bot->SetSheath(SHEATH_STATE_MELEE);
 }
 
 void PlayerbotAI::ChangeEngineOnNonCombat()
@@ -1464,6 +1479,9 @@ void PlayerbotAI::ChangeEngineOnNonCombat()
     {
         aiObjectContext->GetValue<PositionInfo>("pos", "stay")->Reset();
     }
+
+    // Sheath weapon when leaving combat
+    bot->SetSheath(SHEATH_STATE_UNARMED);
 }
 
 void PlayerbotAI::DoNextAction(bool min)

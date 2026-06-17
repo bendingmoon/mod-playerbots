@@ -523,6 +523,67 @@ public:
     PlayerbotsBattlefieldScript() : BattlefieldScript("PlayerbotsBattlefieldScript") { }
 };
 
+// ---- Mobile Auto-Quest Opcode Handler ----
+void WorldSession::HandleMobileAutoQuestStartOpcode(WorldPacket& recvData)
+{
+    uint32 questId;
+    recvData >> questId;
+
+    Player* player = GetPlayer();
+    if (!player)
+    {
+        WorldPacket data(SMSG_MOBILE_AUTO_QUEST_START_RESPONSE, 4 + 1 + 32);
+        data << questId;
+        data << uint8(0); // failed
+        data << std::string("Player not available");
+        SendPacket(&data);
+        return;
+    }
+
+    PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(player);
+    if (!mgr)
+    {
+        WorldPacket data(SMSG_MOBILE_AUTO_QUEST_START_RESPONSE, 4 + 1 + 32);
+        data << questId;
+        data << uint8(0);
+        data << std::string("Bot manager not available");
+        SendPacket(&data);
+        return;
+    }
+
+    // If no questId specified, use the first incomplete quest
+    if (!questId)
+    {
+        for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+        {
+            uint32 qId = player->GetQuestSlotQuestId(i);
+            if (qId && player->GetQuestStatus(qId) == QUEST_STATUS_INCOMPLETE)
+            {
+                questId = qId;
+                break;
+            }
+        }
+    }
+
+    if (!questId)
+    {
+        WorldPacket data(SMSG_MOBILE_AUTO_QUEST_START_RESPONSE, 4 + 1 + 32);
+        data << uint32(0);
+        data << uint8(0);
+        data << std::string("No incomplete quest found");
+        SendPacket(&data);
+        return;
+    }
+
+    bool success = mgr->StartAutoPilot(AutoPilotTask::QUEST, questId);
+
+    WorldPacket data(SMSG_MOBILE_AUTO_QUEST_START_RESPONSE, 4 + 1 + 64);
+    data << questId;
+    data << uint8(success ? 1 : 0);
+    data << std::string(success ? "Auto-quest started" : "Failed to start auto-quest");
+    SendPacket(&data);
+}
+
 void AddPlayerbotsSecureLoginScripts();
 
 void AddSC_TempestKeepBotScripts();
