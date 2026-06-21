@@ -304,6 +304,51 @@ bool LfgTeleportAction::Execute(Event event)
     return true;
 }
 
+bool LfgBootVoteAction::Execute(Event event)
+{
+    WorldPacket p(event.getPacket());
+    if (p.empty())
+        return false;
+
+    uint8 inProgress;
+    uint8 didVote;
+    uint8 agree;
+    ObjectGuid victim;
+    uint32 votesNum;
+    uint32 agreeNum;
+    uint32 secsleft;
+    uint32 neededVotes;
+    std::string reason;
+
+    p.rpos(0);
+    p >> inProgress >> didVote >> agree >> victim >> votesNum >> agreeNum >> secsleft >> neededVotes >> reason;
+
+    // Only vote if the boot proposal is in progress
+    if (!inProgress)
+        return false;
+
+    // Don't vote if we already voted (shouldn't happen, but safety check)
+    if (didVote)
+        return false;
+
+    // Don't vote if this bot is the victim (server auto-sets victim vote to DENY)
+    if (bot->GetGUID() == victim)
+        return false;
+
+    LOG_INFO("playerbots", "Bot {} {}:{} <{}>: LFG boot vote - voting AGREE to kick {} (reason: {})",
+             bot->GetGUID().ToString().c_str(),
+             bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H",
+             bot->GetLevel(), bot->GetName().c_str(),
+             victim.ToString().c_str(), reason.c_str());
+
+    // Send vote: agree = true (1)
+    WorldPacket* packet = new WorldPacket(CMSG_LFG_SET_BOOT_VOTE);
+    *packet << uint8(1);  // agree = true
+    bot->GetSession()->QueuePacket(packet);
+
+    return true;
+}
+
 bool LfgJoinAction::isUseful()
 {
     if (!sPlayerbotAIConfig.randomBotJoinLfg)

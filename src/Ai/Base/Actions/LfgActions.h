@@ -58,4 +58,13 @@ public:
     bool Execute(Event event) override;
 };
 
+class LfgBootVoteAction : public Action
+{
+public:
+    LfgBootVoteAction(PlayerbotAI* botAI) : Action(botAI, "lfg boot vote") {}
+
+    bool Execute(Event event) override;
+    bool isUseful() override { return true; }
+};
+
 #endif

@@ -74,6 +74,7 @@ public:
         creators["arena team invite"] = &WorldPacketTriggerContext::arena_team_invite;
         creators["group destroyed"] = &WorldPacketTriggerContext::group_destroyed;
         creators["group list"] = &WorldPacketTriggerContext::group_list;
+        creators["lfg boot proposal"] = &WorldPacketTriggerContext::lfg_boot_proposal;
     }
 
 private:
@@ -136,6 +137,7 @@ private:
     static Trigger* arena_team_invite(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "arena team invite"); }
     static Trigger* group_destroyed(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "group destroyed"); }
     static Trigger* group_list(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "group list"); }
+    static Trigger* lfg_boot_proposal(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg boot proposal"); }
 };
 
 #endif

@@ -9,6 +9,7 @@
 #include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
+#include "GroupMgr.h"
 #include "LFGMgr.h"
 #include "ObjectAccessor.h"
 #include "Opcodes.h"
@@ -370,8 +371,22 @@ void LfgGroupBotMgr::CleanupBot(LfgSpawnedBotInfo& info)
     Player* bot = ObjectAccessor::FindConnectedPlayer(info.botGuid);
     if (!bot)
     {
-        // Bot is already offline. Clear the "add" event so ProcessBot won't
-        // keep trying to re-add this bot indefinitely, then mark for removal.
+        // Bot is already offline. We can't access bot->GetGroup() since the
+        // player object is gone, but we can look up the LFG group through
+        // sLFGMgr and remove the offline bot from the group.
+        ObjectGuid groupGuid = sLFGMgr->GetGroup(info.botGuid);
+        if (groupGuid)
+        {
+            if (Group* group = sGroupMgr->GetGroupByGUID(groupGuid.GetCounter()))
+            {
+                LOG_INFO("playerbots", "LFG: Removing offline bot {} from group {}",
+                         info.botGuid.ToString().c_str(), groupGuid.ToString().c_str());
+                group->RemoveMember(info.botGuid, GROUP_REMOVEMETHOD_LEAVE);
+            }
+        }
+
+        // Clear the "add" event so ProcessBot won't keep trying to re-add
+        // this bot indefinitely, then mark for removal.
         sRandomPlayerbotMgr.SetEventValue(info.botGuid.GetCounter(), "add", 0, 0);
         m_pendingLogins.erase(info.botGuid.GetCounter());
         info.state = LfgSpawnBotState::TO_LOGOUT;
@@ -389,20 +404,16 @@ void LfgGroupBotMgr::CleanupBot(LfgSpawnedBotInfo& info)
         bot->GetSession()->QueuePacket(packet);
     }
 
-    // 2. Leave group
+    // 2. Leave group (synchronous, before logout)
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (botAI)
     {
         Group* group = bot->GetGroup();
-        if (group && group->isLFGGroup())
+        if (group)
         {
-            // In LFG group, just leave (don't disband)
-            WorldPacket packet(CMSG_GROUP_DISBAND);
-            bot->GetSession()->HandleGroupDisbandOpcode(packet);
-        }
-        else if (group)
-        {
-            botAI->LeaveOrDisbandGroup();
+            LOG_INFO("playerbots", "LFG: Bot {} leaving group before cleanup",
+                     bot->GetName().c_str());
+            group->RemoveMember(bot->GetGUID(), GROUP_REMOVEMETHOD_LEAVE);
         }
     }
 

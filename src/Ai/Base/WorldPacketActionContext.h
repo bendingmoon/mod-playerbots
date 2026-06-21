@@ -111,6 +111,7 @@ public:
         creators["lfg teleport"] = &WorldPacketActionContext::lfg_teleport;
         creators["see spell"] = &WorldPacketActionContext::see_spell;
         creators["arena team accept"] = &WorldPacketActionContext::arena_team_accept;
+        creators["lfg boot vote"] = &WorldPacketActionContext::lfg_boot_vote;
     }
 
 private:
@@ -177,6 +178,7 @@ private:
     static Action* lfg_join(PlayerbotAI* botAI) { return new LfgJoinAction(botAI); }
     static Action* see_spell(PlayerbotAI* botAI) { return new SeeSpellAction(botAI); }
     static Action* arena_team_accept(PlayerbotAI* botAI) { return new ArenaTeamAcceptAction(botAI); }
+    static Action* lfg_boot_vote(PlayerbotAI* botAI) { return new LfgBootVoteAction(botAI); }
 };
 
 #endif

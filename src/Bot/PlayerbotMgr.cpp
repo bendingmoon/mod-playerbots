@@ -351,6 +351,15 @@ void PlayerbotHolder::LogoutPlayerBot(ObjectGuid guid)
         if (!botAI)
             return;
 
+        // Leave group before logging out - ensures the bot doesn't stay
+        // in the group as an offline member. This is the safety net for
+        // all logout paths (LFG cleanup, idle bot rotation, etc.).
+        if (Group* group = bot->GetGroup())
+        {
+            LOG_DEBUG("playerbots", "Bot {} leaving group before logout", bot->GetName().c_str());
+            group->RemoveMember(bot->GetGUID(), GROUP_REMOVEMETHOD_LEAVE);
+        }
+
         // Queue group cleanup operation for world thread
         auto cleanupOp = std::make_unique<BotLogoutGroupCleanupOperation>(guid);
         PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(cleanupOp));
