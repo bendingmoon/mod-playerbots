@@ -111,7 +111,12 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
         if (unit->ToCreature())
             aggroRange = std::min(30.0f, unit->ToCreature()->GetAggroRange(bot) + 10.0f);
         bool outOfAggro = unit->ToCreature() && bot->GetDistance(unit) > aggroRange;
-        if (inactiveGrindStatus && outOfAggro)
+
+        // Auto-pilot: only attack quest-required mobs while doing a quest
+        bool autoPilotQuestOnly = botAI->IsAutoPilotActive() && botAI->rpgInfo.GetStatus() == RPG_DO_QUEST;
+        bool needQuestCheck = (inactiveGrindStatus && outOfAggro) || autoPilotQuestOnly;
+
+        if (needQuestCheck)
         {
             if (needForQuestMap.find(unit->GetEntry()) == needForQuestMap.end())
                 needForQuestMap[unit->GetEntry()] = needForQuest(unit);
@@ -146,6 +151,45 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
                 result = unit;
             }
         }
+    }
+
+    // Auto-pilot: only attack quest-required mobs.
+    // The main loop above already filtered by needForQuest when autoPilotQuestOnly,
+    // but if no target was found (e.g. all targets filtered), do a wider relaxed
+    // scan still restricted to quest mobs.
+    if (!result && botAI->IsAutoPilotActive())
+    {
+        Unit* questMob = nullptr;
+        float questDist = 0;
+
+        for (ObjectGuid const guid : targets)
+        {
+            Unit* unit = botAI->GetUnit(guid);
+            if (!unit || !unit->IsAlive() || !unit->IsInWorld() || unit->IsDuringRemoveFromWorld())
+                continue;
+
+            if (!bot->isHonorOrXPTarget(unit))
+                continue;
+
+            if (unit->ToCreature() && unit->ToCreature()->GetCreatureTemplate()->rank > CREATURE_ELITE_NORMAL
+                && !AI_VALUE(bool, "can fight elite"))
+                continue;
+
+            if (needForQuestMap.find(unit->GetEntry()) == needForQuestMap.end())
+                needForQuestMap[unit->GetEntry()] = needForQuest(unit);
+
+            if (!needForQuestMap[unit->GetEntry()])
+                continue;
+
+            float d = bot->GetDistance(unit);
+            if (!questMob || d < questDist)
+            {
+                questMob = unit;
+                questDist = d;
+            }
+        }
+
+        result = questMob;
     }
 
     return result;

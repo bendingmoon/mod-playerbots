@@ -4602,6 +4602,10 @@ bool PlayerbotAI::AllowActive(ActivityType activityType)
         bot->GetSession()->isLogingOut() || bot->IsDuringRemoveFromWorld())
         return false;
 
+    // Auto-pilot player: always allow full activity
+    if (isAutoPilot)
+        return true;
+
     // always allow packet handling (e.g. group invites, trade, loot, friend requests etc)
     if (activityType == PACKET_ACTIVITY)
         return true;

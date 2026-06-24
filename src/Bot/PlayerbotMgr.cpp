@@ -1570,7 +1570,7 @@ void PlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool /*minimal*/)
     if (autoPilotActive && autoPilotTask == AutoPilotTask::QUEST && master)
     {
         QuestStatus status = master->GetQuestStatus(autoPilotTaskId);
-        if (status == QUEST_STATUS_COMPLETE || status == QUEST_STATUS_REWARDED)
+        if (status == QUEST_STATUS_REWARDED)
         {
             // Quest finished — auto-pilot completed successfully
             StopAutoPilot("Quest completed");
@@ -1894,9 +1894,15 @@ bool PlayerbotMgr::StartAutoPilot(AutoPilotTask task, uint32 taskId)
                 return false;
             }
 
-            // Load "new rpg" strategy for realistic quest gameplay
+            // Load strategies for realistic quest gameplay.
+            // "new rpg" handles travel/POI navigation.
+            // "grind" MUST be in the nonCombat engine (GrindingStrategy extends
+            // NonCombatStrategy) — its "no target" trigger fires "attack anything".
+            // AiFactory already loaded "grind" during construction (IsRealPlayer()
+            // returns true), but we explicitly re-add it here to guarantee
+            // Init() rebuilds the trigger list correctly.
+            playerAI->ChangeStrategy("+grind", BOT_STATE_NON_COMBAT);
             playerAI->ChangeStrategy("+new rpg", BOT_STATE_NON_COMBAT);
-            playerAI->ChangeStrategy("+grind", BOT_STATE_COMBAT);
 
             // Set RPG state to DoQuest for the specific quest
             playerAI->rpgInfo.ChangeToDoQuest(taskId, quest);
@@ -1910,6 +1916,12 @@ bool PlayerbotMgr::StartAutoPilot(AutoPilotTask task, uint32 taskId)
         default:
             break;
     }
+
+    // Rebuild engine trigger/action lists to include the newly added strategies.
+    // "grind" provides the "no target" → "attack anything" trigger.
+    // The combat engine auto-initializes when AttackAction calls
+    // ChangeEngine(BOT_STATE_COMBAT).
+    playerAI->ReInitCurrentEngine();
 
     // Record state in PlayerbotMgr
     autoPilotActive = true;
@@ -1932,15 +1944,11 @@ void PlayerbotMgr::StopAutoPilot(std::string const& reason)
     PlayerbotAI* playerAI = GET_PLAYERBOT_AI(master);
     if (playerAI)
     {
-        // Clear auto-pilot state on AI
-        playerAI->SetAutoPilotState(false, AutoPilotTask::NONE, 0);
-
         // Remove task-specific strategies
         switch (autoPilotTask)
         {
             case AutoPilotTask::QUEST:
                 playerAI->ChangeStrategy("-new rpg", BOT_STATE_NON_COMBAT);
-                playerAI->ChangeStrategy("-grind", BOT_STATE_COMBAT);
                 playerAI->rpgInfo.ChangeToIdle();
                 break;
             case AutoPilotTask::DUNGEON:
@@ -1948,6 +1956,12 @@ void PlayerbotMgr::StopAutoPilot(std::string const& reason)
             default:
                 break;
         }
+
+        // Rebuild engine after strategy removal to clear old triggers
+        playerAI->ReInitCurrentEngine();
+
+        // Clear auto-pilot state on AI (after engine rebuild so Init sees the correct strategy map)
+        playerAI->SetAutoPilotState(false, AutoPilotTask::NONE, 0);
 
         // Stop AI-initiated movement
         if (master->isMoving())
