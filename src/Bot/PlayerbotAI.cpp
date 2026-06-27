@@ -4460,6 +4460,63 @@ Player* PlayerbotAI::FindNewMaster()
     return nullptr;
 }
 
+uint32 PlayerbotAI::GetGatheringSpellId(uint32 skillId)
+{
+    uint32 bestSpellId = 0;
+    uint32 bestRank = 0;
+    for (PlayerSpellMap::const_iterator itr = bot->GetSpellMap().begin(); itr != bot->GetSpellMap().end(); ++itr)
+    {
+        if (itr->second->State == PLAYERSPELL_REMOVED)
+            continue;
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(itr->first);
+        if (!spellInfo)
+            continue;
+        // Gathering spells have EFFECT_OPEN_LOCK with MiscValue matching the lock type
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        {
+            if (spellInfo->Effects[i].Effect == SPELL_EFFECT_OPEN_LOCK)
+            {
+                LockType lockType = LockType(spellInfo->Effects[i].MiscValue);
+                if (SkillByLockType(lockType) == skillId)
+                {
+                    if (spellInfo->GetRank() && spellInfo->GetRank() > bestRank)
+                    {
+                        bestSpellId = itr->first;
+                        bestRank = spellInfo->GetRank();
+                    }
+                }
+            }
+        }
+    }
+    LOG_DEBUG("playerbots", "[AutoGather] GetGatheringSpellId(skillId={}) -> spellId={} rank={}",
+              skillId, bestSpellId, bestRank);
+    return bestSpellId;
+}
+
+uint32 PlayerbotAI::GetOpeningSpellIdByMiscValue(uint32 miscValue)
+{
+    for (PlayerSpellMap::const_iterator itr = bot->GetSpellMap().begin(); itr != bot->GetSpellMap().end(); ++itr)
+    {
+        if (itr->second->State == PLAYERSPELL_REMOVED)
+            continue;
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(itr->first);
+        if (!spellInfo)
+            continue;
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        {
+            if (spellInfo->Effects[i].Effect == SPELL_EFFECT_OPEN_LOCK &&
+                spellInfo->Effects[i].MiscValue == miscValue)
+            {
+                LOG_DEBUG("playerbots", "[AutoGather] GetOpeningSpellByMisc(misc={}) -> spellId={}",
+                          miscValue, itr->first);
+                return itr->first;
+            }
+        }
+    }
+    LOG_DEBUG("playerbots", "[AutoGather] GetOpeningSpellByMisc(misc={}) -> NOT FOUND", miscValue);
+    return 0;
+}
+
 bool PlayerbotAI::HasRealPlayerMaster()
 {
     if (master)

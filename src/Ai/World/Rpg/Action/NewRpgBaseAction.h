@@ -46,6 +46,8 @@ protected:
 
     /* QUEST RELATED ACTION */
     bool SearchQuestGiverAndAcceptOrReward();
+    GameObject* FindNearestQuestGameObject(uint32 gameObjectEntry, float range = 70.0f);
+    GameObject* FindNearestQuestItemGameObject(uint32 questItemId, float range = 70.0f);
     bool AcceptQuest(Quest const* quest, ObjectGuid guid);
     bool TurnInQuest(Quest const* quest, ObjectGuid guid);
     bool OrganizeQuestLog();

@@ -1,13 +1,18 @@
 #include "NewRpgBaseAction.h"
 
 #include "BroadcastHelper.h"
+#include "CellImpl.h"
 #include "ChatHelper.h"
 #include "Creature.h"
 #include "G3D/Vector2.h"
 #include "GameObject.h"
 #include "GossipDef.h"
 #include "GridTerrainData.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
 #include "IVMapMgr.h"
+#include "LootMgr.h"
+#include "NearestGameObjects.h"
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
 #include "Object.h"
@@ -305,15 +310,19 @@ bool NewRpgBaseAction::InteractWithNpcOrGameObjectForQuest(ObjectGuid guid)
             continue;
 
         const QuestStatus& status = bot->GetQuestStatus(item.QuestId);
+        // Auto-pilot: do NOT accept new quests, only turn in the target quest
         if (status == QUEST_STATUS_NONE && bot->CanTakeQuest(quest, false) && bot->CanAddQuest(quest, false) &&
             IsQuestWorthDoing(quest) && IsQuestCapableDoing(quest))
         {
-            AcceptQuest(quest, guid);
-            if (botAI->GetMaster())
-                botAI->TellMasterNoFacing("Quest accepted " + ChatHelper::FormatQuest(quest));
-            BroadcastHelper::BroadcastQuestAccepted(botAI, bot, quest);
-            botAI->rpgStatistic.questAccepted++;
-            LOG_DEBUG("playerbots", "[New RPG] {} accept quest {}", bot->GetName(), quest->GetQuestId());
+            if (!botAI->IsAutoPilotActive())
+            {
+                AcceptQuest(quest, guid);
+                if (botAI->GetMaster())
+                    botAI->TellMasterNoFacing("Quest accepted " + ChatHelper::FormatQuest(quest));
+                BroadcastHelper::BroadcastQuestAccepted(botAI, bot, quest);
+                botAI->rpgStatistic.questAccepted++;
+                LOG_DEBUG("playerbots", "[New RPG] {} accept quest {}", bot->GetName(), quest->GetQuestId());
+            }
         }
         if (status == QUEST_STATUS_COMPLETE && bot->CanRewardQuest(quest, 0, false))
         {
@@ -569,6 +578,10 @@ bool NewRpgBaseAction::IsQuestCapableDoing(Quest const* quest)
 
 bool NewRpgBaseAction::OrganizeQuestLog()
 {
+    // Auto-pilot: never drop quests automatically
+    if (botAI->IsAutoPilotActive())
+        return false;
+
     int32 freeSlotNum = 0;
 
     for (uint16 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
@@ -653,6 +666,85 @@ bool NewRpgBaseAction::OrganizeQuestLog()
     }
 
     return true;
+}
+
+GameObject* NewRpgBaseAction::FindNearestQuestGameObject(uint32 gameObjectEntry, float range)
+{
+    std::list<GameObject*> targets;
+    AnyGameObjectInObjectRangeCheck u_check(bot, range);
+    Acore::GameObjectListSearcher<AnyGameObjectInObjectRangeCheck> searcher(bot, targets, u_check);
+    Cell::VisitObjects(bot, searcher, range);
+
+    GameObject* result = nullptr;
+    float minDist = 0;
+    int goCount = 0;
+    for (GameObject* go : targets)
+    {
+        if (!go || !go->isSpawned())
+            continue;
+
+        if (go->GetGOInfo()->entry != gameObjectEntry)
+            continue;
+
+        if (!go->IsInWorld())
+            continue;
+
+        ++goCount;
+        float dist = bot->GetDistance(go);
+        if (!result || dist < minDist)
+        {
+            result = go;
+            minDist = dist;
+        }
+    }
+
+    LOG_DEBUG("playerbots", "[AutoGather] FindQuestGO(entry={} range={}): {} of {} targets match, nearest={}@{:.1f}yd",
+              gameObjectEntry, range, goCount, targets.size(), result ? std::to_string(result->GetEntry()) : "none", minDist);
+
+    return result;
+}
+
+GameObject* NewRpgBaseAction::FindNearestQuestItemGameObject(uint32 questItemId, float range)
+{
+    std::list<GameObject*> targets;
+    AnyGameObjectInObjectRangeCheck u_check(bot, range);
+    Acore::GameObjectListSearcher<AnyGameObjectInObjectRangeCheck> searcher(bot, targets, u_check);
+    Cell::VisitObjects(bot, searcher, range);
+
+    GameObject* result = nullptr;
+    float minDist = 0;
+    int goCount = 0;
+    for (GameObject* go : targets)
+    {
+        if (!go || !go->isSpawned() || !go->IsInWorld())
+            continue;
+
+        // Only consider GO types that can be gathered/looted
+        uint32 goType = go->GetGoType();
+        if (goType != GAMEOBJECT_TYPE_CHEST && goType != GAMEOBJECT_TYPE_GOOBER)
+            continue;
+
+        // Check if this GO's loot contains quest items the player needs
+        uint32 lootId = go->GetGOInfo()->GetLootId();
+        if (!lootId)
+            continue;
+
+        if (!LootTemplates_Gameobject.HaveQuestLootForPlayer(lootId, bot))
+            continue;
+
+        ++goCount;
+        float dist = bot->GetDistance(go);
+        if (!result || dist < minDist)
+        {
+            result = go;
+            minDist = dist;
+        }
+    }
+
+    LOG_DEBUG("playerbots", "[AutoGather] FindQuestItemGO(itemId={} range={}): {} of {} targets by loot, nearest={}@{:.1f}yd",
+              questItemId, range, goCount, targets.size(), result ? std::to_string(result->GetEntry()) : "none", minDist);
+
+    return result;
 }
 
 bool NewRpgBaseAction::SearchQuestGiverAndAcceptOrReward()
@@ -768,7 +860,9 @@ bool NewRpgBaseAction::HasQuestToAcceptOrReward(WorldObject* object)
             continue;
 
         const QuestStatus& status = bot->GetQuestStatus(item.QuestId);
-        if (status == QUEST_STATUS_NONE && bot->CanTakeQuest(quest, false) && bot->CanAddQuest(quest, false) &&
+        // Auto-pilot: do not route to NPCs just to accept new quests
+        if (status == QUEST_STATUS_NONE && !botAI->IsAutoPilotActive() &&
+            bot->CanTakeQuest(quest, false) && bot->CanAddQuest(quest, false) &&
             IsQuestWorthDoing(quest) && IsQuestCapableDoing(quest))
         {
             return true;

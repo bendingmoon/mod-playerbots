@@ -571,6 +571,10 @@ public:
         autoPilotTaskId = taskId;
         autoPilotStartTime = active ? time(nullptr) : 0;
     }
+    // Find the highest-rank gathering spell (Herb Gathering / Mining)
+    // the player knows for the given skill ID.
+    uint32 GetGatheringSpellId(uint32 skillId);
+    uint32 GetOpeningSpellIdByMiscValue(uint32 miscValue);
     // Bot has a master that is a player.
     bool HasRealPlayerMaster();
     // Bot has a master that is activly playing.

@@ -45,6 +45,7 @@ struct NewRpgInfo
         int32 objectiveIdx{0};
         WorldPosition pos{};
         uint32 lastReachPOI{0};
+        ObjectGuid lastInteractGO{};   // track last interacted GO to avoid spam
     };
     // RPG_TRAVEL_FLIGHT
     struct TravelFlight

@@ -197,6 +197,35 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
 
 bool GrindTargetValue::needForQuest(Unit* target)
 {
+    // Auto-pilot: only check the one quest we are auto-completing
+    if (botAI->IsAutoPilotActive())
+    {
+        uint32 questId = botAI->GetAutoPilotTaskId();
+        if (!questId)
+            return false;
+
+        Quest const* questTemplate = sObjectMgr->GetQuestTemplate(questId);
+        if (!questTemplate)
+            return false;
+
+        if (bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            return false;
+
+        const QuestStatusData* questStatus = &bot->getQuestStatusMap()[questId];
+        for (int j = 0; j < QUEST_OBJECTIVES_COUNT; j++)
+        {
+            int32 entry = questTemplate->RequiredNpcOrGo[j];
+            if (entry && entry > 0)
+            {
+                int required = questTemplate->RequiredNpcOrGoCount[j];
+                int available = questStatus->CreatureOrGOCount[j];
+                if (required && available < required && target->GetEntry() == entry)
+                    return true;
+            }
+        }
+        return false;
+    }
+
     QuestStatusMap& questMap = bot->getQuestStatusMap();
     for (auto& quest : questMap)
     {

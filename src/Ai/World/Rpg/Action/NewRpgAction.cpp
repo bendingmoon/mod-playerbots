@@ -3,10 +3,16 @@
 #include <cmath>
 #include <cstdlib>
 
-#include "AreaDefines.h"
 #include "BroadcastHelper.h"
+#include "CellImpl.h"
 #include "ChatHelper.h"
+#include "DBCStores.h"
+#include "DBCStructure.h"
 #include "G3D/Vector2.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
+#include "LootMgr.h"
+#include "NearestGameObjects.h"
 #include "GossipDef.h"
 #include "IVMapMgr.h"
 #include "NewRpgInfo.h"
@@ -301,6 +307,7 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
             data.lastReachPOI = 0;
             data.pos = WorldPosition();
             data.objectiveIdx = 0;
+            data.lastInteractGO.Clear();
         }
     }
     if (data.pos == WorldPosition())
@@ -329,6 +336,7 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
         data.lastReachPOI = 0;
         data.pos = pos;
         data.objectiveIdx = objectiveIdx;
+        data.lastInteractGO.Clear();
     }
 
     if (bot->GetDistance(data.pos) > 10.0f && !data.lastReachPOI)
@@ -341,7 +349,8 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
         return MoveRandomNear(10.0f);
     }
     // Now we are near the quest objective
-    // kill mobs and looting quest should be done automatically by grind strategy
+    // Creature-killing and loot should be handled automatically by grind strategy.
+    // Gameobject interaction (gathering, mining, etc.) is handled below.
 
     if (!data.lastReachPOI)
     {
@@ -383,6 +392,253 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
         data.pos = WorldPosition();
         data.objectiveIdx = 0;
         return true;
+    }
+
+    // At the POI: check if the current objective requires interacting with
+    // a gameobject. Two patterns exist in quest design:
+    //
+    // 1) NPC/GO objective (indices 0-3 in RequiredNpcOrGo):
+    //    - RequiredNpcOrGo[i] < 0 → gameobject template entry (negate it)
+    //    Search GOs by entry ID.
+    //
+    // 2) Item objective (indices 4-9 in RequiredItemId):
+    //    - The quest item drops from gameobject loot (e.g. "Cactus Apple"
+    //      from "Cactus" plants).
+    //    Search GOs whose loot table contains quest items the player needs.
+    //
+    // Both paths feed into the same interaction logic below.
+    int32 goObjectiveIdx = data.objectiveIdx;
+    Quest const* goQuest = sObjectMgr->GetQuestTemplate(questId);
+    GameObject* go = nullptr;
+    if (goObjectiveIdx < QUEST_OBJECTIVES_COUNT && goQuest)
+    {
+        int32 npcOrGoEntry = goQuest->RequiredNpcOrGo[goObjectiveIdx];
+        LOG_DEBUG("playerbots", "[AutoGather] {} quest {} objectiveIdx={} npcOrGoEntry={}",
+                  bot->GetName(), questId, goObjectiveIdx, npcOrGoEntry);
+        if (npcOrGoEntry < 0)  // GO objective
+        {
+            go = FindNearestQuestGameObject(-npcOrGoEntry, 80.0f);
+            LOG_DEBUG("playerbots", "[AutoGather] {} FindNearestQuestGameObject(entry={}) -> {}",
+                      bot->GetName(), -npcOrGoEntry, go ? "found" : "NOT FOUND");
+        }
+    }
+    else if (goObjectiveIdx >= QUEST_OBJECTIVES_COUNT &&
+             goObjectiveIdx < QUEST_OBJECTIVES_COUNT + QUEST_ITEM_OBJECTIVES_COUNT && goQuest)
+    {
+        uint32 itemIdx = goObjectiveIdx - QUEST_OBJECTIVES_COUNT;
+        uint32 questItemId = goQuest->RequiredItemId[itemIdx];
+        LOG_DEBUG("playerbots", "[AutoGather] {} quest {} objectiveIdx={} (item) questItemId={}",
+                  bot->GetName(), questId, goObjectiveIdx, questItemId);
+        if (questItemId)
+        {
+            go = FindNearestQuestItemGameObject(questItemId, 80.0f);
+            LOG_DEBUG("playerbots", "[AutoGather] {} FindNearestQuestItemGameObject(itemId={}) -> {}",
+                      bot->GetName(), questItemId, go ? "found" : "NOT FOUND");
+        }
+    }
+
+    if (go)
+    {
+        float dist = bot->GetDistance(go);
+        // Use the GO's actual interaction distance (varies per GO type),
+        // not the generic INTERACTION_DISTANCE. This matches what the
+        // server checks in HandleGameObjectUseOpcode and spell range validation.
+        float goInteractDist = go->GetInteractionDistance();
+        LOG_DEBUG("playerbots", "[AutoGather] {} GO entry={} type={} dist={:.2f} goInteractDist={:.2f} isMoving={} lastGO={}",
+                  bot->GetName(), go->GetEntry(), go->GetGoType(), dist, goInteractDist,
+                  bot->isMoving() ? 1 : 0,
+                  (data.lastInteractGO == go->GetGUID()) ? "same" : "new");
+        if (dist <= goInteractDist)
+        {
+            if (bot->isMoving())
+            {
+                LOG_DEBUG("playerbots", "[AutoGather] {} still moving, waiting for stop", bot->GetName());
+                return false;
+            }
+            if (bot->IsNonMeleeSpellCast(false))
+            {
+                LOG_DEBUG("playerbots", "[AutoGather] {} already casting, waiting", bot->GetName());
+                return false;
+            }
+            // Don't re-interact with the same GO — the spell or loot from
+            // the previous tick may still be processing. If blocked, search
+            // for the next unblocked GO instead of returning (otherwise we'd
+            // be stuck forever since the nearest is always the blocked one).
+            if (data.lastInteractGO == go->GetGUID())
+            {
+                LOG_DEBUG("playerbots", "[AutoGather] {} nearest GO already-interacted, searching next candidate",
+                          bot->GetName());
+                go = nullptr;
+                std::list<GameObject*> candidates;
+                AnyGameObjectInObjectRangeCheck u_check(bot, 80.0f);
+                Acore::GameObjectListSearcher<AnyGameObjectInObjectRangeCheck> searcher(bot, candidates, u_check);
+                Cell::VisitObjects(bot, searcher, 80.0f);
+                float bestDist = 80.0f;
+                for (GameObject* candidate : candidates)
+                {
+                    if (!candidate || !candidate->isSpawned() || !candidate->IsInWorld())
+                        continue;
+                    uint32 ct = candidate->GetGoType();
+                    if (ct != GAMEOBJECT_TYPE_CHEST && ct != GAMEOBJECT_TYPE_GOOBER)
+                        continue;
+                    uint32 lid = candidate->GetGOInfo()->GetLootId();
+                    if (!lid || !LootTemplates_Gameobject.HaveQuestLootForPlayer(lid, bot))
+                        continue;
+                    if (candidate->GetGUID() == data.lastInteractGO)
+                        continue;
+                    float d = bot->GetDistance(candidate);
+                    if (d < bestDist) { go = candidate; bestDist = d; }
+                }
+                LOG_DEBUG("playerbots", "[AutoGather] {} next unblocked GO -> {} (dist={:.1f})",
+                          bot->GetName(), go ? std::to_string(go->GetEntry()) : "NONE", bestDist);
+                if (!go)
+                    return false; // no other GO nearby, wait for respawn or POI timeout
+
+                // Always move to the new candidate GO first, even if it's
+                // technically within range. The bot is positioned near the
+                // previous GO and the spell's actual range may be shorter
+                // than goInteractDist, causing "out of range" on the cast.
+                float newDist = bot->GetDistance(go);
+                float newInteractDist = go->GetInteractionDistance();
+                LOG_DEBUG("playerbots", "[AutoGather] {} unblocked GO at {:.1f}yd, moving to it first",
+                          bot->GetName(), newDist);
+                return MoveWorldObjectTo(go->GetGUID(), newInteractDist);
+            }
+
+            if (!go)
+                return false;
+
+            GameObjectTemplate const* goInfo = go->GetGOInfo();
+            bool interacted = false;
+            switch (go->GetGoType())
+            {
+                case GAMEOBJECT_TYPE_GOOBER:
+                    LOG_DEBUG("playerbots", "[AutoGather] {} GOOBER -> go->Use()", bot->GetName());
+                    bot->SetFacingToObject(go);
+                    go->Use(bot);
+                    interacted = true;
+                    break;
+                case GAMEOBJECT_TYPE_CHEST:
+                {
+                    uint32 lockId = goInfo->GetLockId();
+                    uint32 gatherSpellId = 0;
+                    LOG_DEBUG("playerbots", "[AutoGather] {} CHEST lockId={}", bot->GetName(), lockId);
+                    if (lockId)
+                    {
+                        LockEntry const* lockInfo = sLockStore.LookupEntry(lockId);
+                        if (lockInfo)
+                        {
+                            // Pass 1: LOCK_KEY_SKILL with required profession
+                            for (uint8 i = 0; i < MAX_LOCK_CASE && !gatherSpellId; ++i)
+                            {
+                                if (lockInfo->Type[i] == LOCK_KEY_SKILL)
+                                {
+                                    uint32 skillId = SkillByLockType(LockType(lockInfo->Index[i]));
+                                    uint32 reqSkill = std::max(2u, lockInfo->Skill[i]);
+                                    LOG_DEBUG("playerbots", "[AutoGather] {} LOCK_KEY_SKILL skillId={} reqSkill={} hasSkill={} skillVal={}",
+                                              bot->GetName(), skillId, reqSkill,
+                                              bot->HasSkill((SkillType)skillId) ? 1 : 0,
+                                              bot->GetSkillValue(skillId));
+                                    if ((skillId == SKILL_MINING || skillId == SKILL_HERBALISM ||
+                                         skillId == SKILL_LOCKPICKING) &&
+                                        bot->HasSkill((SkillType)skillId) &&
+                                        uint32(bot->GetSkillValue(skillId)) >= reqSkill)
+                                        gatherSpellId = botAI->GetGatheringSpellId(skillId);
+                                }
+                            }
+                            // Pass 2: LOCK_KEY_SKILL → try generic opening spell by EffectMiscValue
+                            // (e.g. spell 22810 "Opening"). Matches the client's
+                            // SpellEffectMiscCache[properties2] lookup.
+                            for (uint8 i = 0; i < MAX_LOCK_CASE && !gatherSpellId; ++i)
+                            {
+                                if (lockInfo->Type[i] == LOCK_KEY_SKILL)
+                                {
+                                    gatherSpellId = botAI->GetOpeningSpellIdByMiscValue(lockInfo->Index[i]);
+                                    if (gatherSpellId)
+                                        LOG_DEBUG("playerbots", "[AutoGather] {} LOCK_KEY_SKILL misc={} -> spellId={}",
+                                                  bot->GetName(), lockInfo->Index[i], gatherSpellId);
+                                }
+                            }
+                            // Pass 3: LOCK_KEY_SPELL → explicit spell ID
+                            for (uint8 i = 0; i < MAX_LOCK_CASE && !gatherSpellId; ++i)
+                            {
+                                if (lockInfo->Type[i] == LOCK_KEY_SPELL)
+                                {
+                                    gatherSpellId = lockInfo->Index[i];
+                                    LOG_DEBUG("playerbots", "[AutoGather] {} LOCK_KEY_SPELL -> spellId={}",
+                                              bot->GetName(), gatherSpellId);
+                                }
+                            }
+                            // Pass 4: LOCK_KEY_ITEM → key in inventory
+                            for (uint8 i = 0; i < MAX_LOCK_CASE && !gatherSpellId && !interacted; ++i)
+                            {
+                                if (lockInfo->Type[i] == LOCK_KEY_ITEM &&
+                                    bot->GetItemCount(lockInfo->Index[i]) > 0)
+                                {
+                                    LOG_DEBUG("playerbots", "[AutoGather] {} LOCK_KEY_ITEM key={} -> Use",
+                                              bot->GetName(), lockInfo->Index[i]);
+                                    go->Use(bot);
+                                    interacted = true;
+                                }
+                            }
+                        }
+                        else
+                            LOG_DEBUG("playerbots", "[AutoGather] {} lockInfo NOT FOUND for lockId={}",
+                                      bot->GetName(), lockId);
+                    }
+                    if (gatherSpellId)
+                    {
+                        LOG_DEBUG("playerbots", "[AutoGather] {} CastSpell(spellId={})", bot->GetName(), gatherSpellId);
+                        bot->SetFacingToObject(go);
+                        bot->CastSpell(go, gatherSpellId, false);
+                        interacted = true;
+                    }
+                    // Only SendLoot if no spell was found AND we haven't already
+                    // interacted with this GO (anti-spam, since SendLoot bypasses
+                    // the normal GO despawn/respawn cycle).
+                    if (!interacted && data.lastInteractGO != go->GetGUID())
+                    {
+                        LOG_DEBUG("playerbots", "[AutoGather] {} fallback -> SendLoot (no spell found)", bot->GetName());
+                        bot->SetFacingToObject(go);
+                        bot->SendLoot(go->GetGUID(), LOOT_SKINNING);
+                        interacted = true;
+                        data.lastInteractGO = go->GetGUID();
+                    }
+                    else if (!interacted)
+                    {
+                        LOG_DEBUG("playerbots", "[AutoGather] {} skipping same GO (already interacted)", bot->GetName());
+                    }
+                    // Send CMSG_GAMEOBJ_REPORT_USE — the client always sends this
+                    // after interacting with a GO. It triggers go->AI()->GossipHello()
+                    // which may be required for quest credit on some GOs.
+                    {
+                        WorldPacket reportPacket(CMSG_GAMEOBJ_REPORT_USE, 8);
+                        reportPacket << go->GetGUID();
+                        bot->GetSession()->HandleGameobjectReportUse(reportPacket);
+                    }
+                    break;
+                }
+                default:
+                    LOG_DEBUG("playerbots", "[AutoGather] {} unhandled GO type={} -> go->Use()",
+                              bot->GetName(), go->GetGoType());
+                    break;
+            }
+            if (!interacted)
+            {
+                bot->SetFacingToObject(go);
+                go->Use(bot);
+            }
+            // Record which GO we interacted with to prevent re-casting
+            // on the same object next tick (anti-spam for instant spells).
+            data.lastInteractGO = go->GetGUID();
+            return true;
+        }
+        else
+        {
+            LOG_DEBUG("playerbots", "[AutoGather] {} moving to GO (dist={:.2f} targetDist={:.2f})",
+                      bot->GetName(), dist, goInteractDist);
+            return MoveWorldObjectTo(go->GetGUID(), goInteractDist);
+        }
     }
 
     // At the POI: keep the bot actively placed but avoid large
